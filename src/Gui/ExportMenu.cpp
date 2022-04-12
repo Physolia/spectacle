@@ -21,7 +21,7 @@
 using namespace std::chrono_literals;
 
 ExportMenu::ExportMenu(QWidget *parent)
-    : QMenu(parent)
+    : SpectacleMenu(parent)
 #ifdef PURPOSE_FOUND
     , mUpdatedImageAvailable(false)
     , mPurposeMenu(new Purpose::Menu(this))

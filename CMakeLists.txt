@@ -40,6 +40,10 @@ find_package(
     Qt${QT_MAJOR_VERSION} ${QT_MIN_VERSION} CONFIG REQUIRED
         Core
         Concurrent
+        Qml
+        Quick
+        QuickControls2
+        QuickTemplates2
         Widgets
         DBus
         PrintSupport
@@ -62,6 +66,7 @@ find_package(
         XmlGui
         Wayland
         GuiAddons
+        Kirigami2
 )
 # optional components
 find_package(KF5DocTools ${KF5_MIN_VERSION})
@@ -141,7 +146,7 @@ add_subdirectory(src)
 add_subdirectory(dbus)
 add_subdirectory(desktop)
 add_subdirectory(icons)
-add_subdirectory(tests)
+#add_subdirectory(tests)
 
 if (KF5DocTools_FOUND)
     add_subdirectory(doc)

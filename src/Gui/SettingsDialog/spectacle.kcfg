@@ -5,10 +5,12 @@
       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
                           http://www.kde.org/standards/kcfg/1.0/kcfg.xsd" >
 <include>QStandardPaths</include>
-<include>SpectacleCommon.h</include>
+<include>CaptureModeModel.h</include>
 <kcfgfile />
 <group name="General">
-    <entry name="onLaunchAction" type="Enum">
+    <entry name="launchAction" key="onLaunchAction" type="Enum">
+        <!--Using a name that doesn't look like a signal handler.-->
+        <!--Not changing the key to avoid having to migrate.-->
         <label>What to do when Spectacle is launched</label>
         <choices>
         <choice name="TakeFullscreenScreenshot"></choice>
@@ -62,11 +64,13 @@
     </entry>
 </group>
 <group name="GuiConfig">
-    <entry name="cropRegion" type="IntList">
+    <entry name="cropRegion" type="Rect">
         <label>The last used region the user selected</label>
-        <default>0,0,0,0</default>
+        <default>QRect()</default>
     </entry>
-    <entry name="onClickChecked" type="Bool">
+    <entry name="captureOnClick" key="onClickChecked" type="Bool">
+        <!--Using a name that doesn't look like a signal handler.-->
+        <!--Not changing the key to avoid having to migrate.-->
         <label>Take screenshot on click</label>
         <default>false</default>
     </entry>
@@ -89,10 +93,11 @@
     <entry name="captureDelay" type="Double">
         <label>Delay</label>
         <default>0</default>
+        <min>0</min>
     </entry>
     <entry name="captureMode" type="Enum">
-        <choices name="Spectacle::CaptureMode"></choices>
-        <default>Spectacle::CaptureMode::AllScreens</default>
+        <choices name="CaptureModeModel::CaptureMode"></choices>
+        <default>CaptureModeModel::CaptureMode::AllScreens</default>
     </entry>
 </group>
 <group name="Save">
@@ -105,6 +110,8 @@
     <entry name="compressionQuality" type="UInt">
         <label>Compression quality for lossy file formats</label>
         <default>90</default>
+        <min>0</min>
+        <max>100</max>
     </entry>
      <entry name="defaultSaveImageFormat" type="String">
         <label>Default save image format</label>

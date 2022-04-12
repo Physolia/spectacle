@@ -24,7 +24,6 @@ public:
     QAction *activeWindowAction() const;
     QAction *regionAction() const;
     QAction *windowUnderCursorAction() const;
-    QAction *openWithoutScreenshotAction() const;
 
 private:
     ShortcutActions();

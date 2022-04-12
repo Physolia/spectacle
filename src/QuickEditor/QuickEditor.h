@@ -34,17 +34,17 @@ Q_SIGNALS:
 
 private:
     enum MouseState : short {
-        None = 0, // 0000
-        Inside = 1 << 0, // 0001
-        Outside = 1 << 1, // 0010
-        TopLeft = 5, // 101
-        Top = 17, // 10001
-        TopRight = 9, // 1001
-        Right = 33, // 100001
-        BottomRight = 6, // 110
-        Bottom = 18, // 10010
-        BottomLeft = 10, // 1010
-        Left = 34, // 100010
+        None =          0b000000,
+        Inside =        0b000001,
+        Outside =       0b000010,
+        TopLeft =       0b000101,
+        Top =           0b010001,
+        TopRight =      0b001001,
+        Right =         0b100001,
+        BottomRight =   0b000110,
+        Bottom =        0b010010,
+        BottomLeft =    0b001010,
+        Left =          0b100010,
         TopLeftOrBottomRight = TopLeft & BottomRight, // 100
         TopRightOrBottomLeft = TopRight & BottomLeft, // 1000
         TopOrBottom = Top & Bottom, // 10000

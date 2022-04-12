@@ -7,7 +7,7 @@
 #ifndef EXPORTMENU_H
 #define EXPORTMENU_H
 
-#include <QMenu>
+#include "SpectacleMenu.h"
 
 #include "Config.h"
 #include "ExportManager.h"
@@ -17,7 +17,7 @@
 #include <PurposeWidgets/Menu>
 #endif
 
-class ExportMenu : public QMenu
+class ExportMenu : public SpectacleMenu
 {
     Q_OBJECT
 

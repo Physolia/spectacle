@@ -7,9 +7,11 @@
 
 class QCommandLineParser;
 #include <QObject>
+#include <QQmlEngine>
+#include <QQuickItem>
 
 #include "ExportManager.h"
-#include "Gui/KSMainWindow.h"
+#include "Gui/SpectacleMainWindow.h"
 #include "Platforms/PlatformLoader.h"
 #include "QuickEditor/QuickEditor.h"
 
@@ -23,13 +25,11 @@ class PlasmaShell;
 }
 }
 
-using MainWindowPtr = std::unique_ptr<KSMainWindow>;
-using EditorPtr = std::unique_ptr<QuickEditor>;
-
 class SpectacleCore : public QObject
 {
     Q_OBJECT
-
+    Q_PROPERTY(CaptureModeModel *captureModeModel READ captureModeModel CONSTANT FINAL)
+    Q_PROPERTY(QUrl screenCaptureUrl READ screenCaptureUrl NOTIFY screenCaptureUrlChanged FINAL)
 public:
     enum class StartMode {
         Gui = 0,
@@ -41,51 +41,62 @@ public:
     ~SpectacleCore() override = default;
     void init();
 
-    QString filename() const;
-    void setFilename(const QString &filename);
+    CaptureModeModel *captureModeModel() const;
+
+    QUrl screenCaptureUrl() const;
+    void setScreenCaptureUrl(const QUrl &url);
+    // Used when setting the URL from CLI
+    void setScreenCaptureUrl(const QString &filePath);
 
     void populateCommandLineParser(QCommandLineParser *lCmdLineParser);
+
     void initGuiNoScreenshot();
 
-Q_SIGNALS:
-
-    void errorMessage(const QString &errString);
-    void allDone();
-    void grabFailed();
-
 public Q_SLOTS:
-
-    void takeNewScreenshot(Spectacle::CaptureMode theCaptureMode, int theTimeout, bool theIncludePointer, bool theIncludeDecorations);
+    void takeNewScreenshot(int captureMode, int timeout, bool includePointer, bool includeDecorations);
     void showErrorMessage(const QString &theErrString);
-    void screenshotUpdated(const QPixmap &thePixmap);
-    void screenshotsUpdated(const QVector<QImage> &imgs);
-    void screenshotCanceled();
-    void screenshotFailed();
+    void onScreenshotUpdated(const QPixmap &thePixmap);
+    void onScreenshotsUpdated(const QVector<QImage> &imgs);
+    void onScreenshotCanceled();
+    void onScreenshotFailed();
     void doStartDragAndDrop();
     void doNotify(const QUrl &theSavedAt);
     void doCopyPath(const QUrl &savedAt);
 
     void onActivateRequested(QStringList arguments, const QString & /*workingDirectory */);
 
+Q_SIGNALS:
+    void screenCaptureUrlChanged();
+
+    void errorMessage(const QString &errString);
+    void allDone();
+    void grabFailed();
+
 private:
+    QQmlEngine *getQmlEngine();
+    SpectacleMainWindow *getMainWindow();
+
     void ensureGuiInitiad();
     void initGui(int theDelay, bool theIncludePointer, bool theIncludeDecorations);
-    Platform::GrabMode toPlatformGrabMode(Spectacle::CaptureMode theCaptureMode);
-    void setUpShortcuts();
 
-    StartMode mStartMode;
-    bool mNotify;
-    QString mFileNameString;
-    QUrl mFileNameUrl;
-    PlatformPtr mPlatform;
-    MainWindowPtr mMainWindow = nullptr;
-    EditorPtr mQuickEditor;
-    bool mIsGuiInited = false;
-    bool mCopyImageToClipboard;
-    bool mCopyLocationToClipboard;
-    bool mSaveToOutput;
-    bool mEditExisting;
-    bool mExistingLoaded;
+    Platform::GrabMode toPlatformGrabMode(CaptureModeModel::CaptureMode theCaptureMode);
 
-    KWayland::Client::PlasmaShell *mWaylandPlasmashell = nullptr;
+    StartMode m_startMode;
+    bool m_notify;
+    QUrl m_screenCaptureUrl;
+    PlatformPtr m_platform;
+    std::unique_ptr<QQmlEngine> m_qmlEngine;
+    std::unique_ptr<CaptureModeModel> m_captureModeModel;
+    std::unique_ptr<SpectacleMainWindow> m_mainWindow;
+//     MainWindowPtr mMainWindow = nullptr;
+    std::unique_ptr<QQuickItem> m_quickEditor;
+//     EditorPtr mQuickEditor;
+    bool m_isGuiInited = false;
+    bool m_copyImageToClipboard;
+    bool m_copyLocationToClipboard;
+    bool m_saveToOutput;
+    bool m_editExisting;
+    bool m_existingLoaded;
+
+    KWayland::Client::PlasmaShell *m_waylandPlasmashell = nullptr;
 };

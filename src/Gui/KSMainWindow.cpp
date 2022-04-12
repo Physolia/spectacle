@@ -611,7 +611,7 @@ void KSMainWindow::saveAs()
     setDefaultSaveAction();
 
     const bool quitChecked = Settings::quitAfterSaveCopyExport();
-    if (ExportManager::instance()->doSaveAs(this, /* notify */ quitChecked) && quitChecked) {
+    if (ExportManager::instance()->doSaveAs(/* notify */ quitChecked) && quitChecked) {
         quit(QuitBehavior::QuitExternally);
     }
 }

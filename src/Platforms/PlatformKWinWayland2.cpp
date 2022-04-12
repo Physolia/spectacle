@@ -249,6 +249,10 @@ PlatformKWinWayland2::PlatformKWinWayland2(QObject *parent)
     if (reply.type() == QDBusMessage::ReplyMessage) {
         m_apiVersion = reply.arguments().constFirst().value<QDBusVariant>().variant().toUInt();
     }
+
+    updateSupportedGrabModes();
+    connect(qGuiApp, &QGuiApplication::screenAdded, this, &PlatformKWinWayland2::updateSupportedGrabModes);
+    connect(qGuiApp, &QGuiApplication::screenRemoved, this, &PlatformKWinWayland2::updateSupportedGrabModes);
 }
 
 QString PlatformKWinWayland2::platformName() const
@@ -258,18 +262,25 @@ QString PlatformKWinWayland2::platformName() const
 
 Platform::GrabModes PlatformKWinWayland2::supportedGrabModes() const
 {
-    Platform::GrabModes supportedModes = GrabMode::AllScreens | GrabMode::WindowUnderCursor | GrabMode::PerScreenImageNative | GrabMode::AllScreensScaled;
+    return m_grabModes;
+}
+
+void PlatformKWinWayland2::updateSupportedGrabModes()
+{
+    Platform::GrabModes grabModes = GrabMode::AllScreens | GrabMode::WindowUnderCursor | GrabMode::PerScreenImageNative | GrabMode::AllScreensScaled;
 
     if (m_apiVersion >= 2) {
-        supportedModes |= GrabMode::ActiveWindow;
+        grabModes |= GrabMode::ActiveWindow;
     }
 
-    const QList<QScreen *> screens = QGuiApplication::screens();
-    if (screens.count() > 1) {
-        supportedModes |= GrabMode::CurrentScreen;
+    if (QGuiApplication::screens().count() > 1) {
+        grabModes |= GrabMode::CurrentScreen;
     }
 
-    return supportedModes;
+    if (m_grabModes != grabModes) {
+        m_grabModes = grabModes;
+        Q_EMIT supportedGrabModesChanged();
+    }
 }
 
 Platform::ShutterModes PlatformKWinWayland2::supportedShutterModes() const

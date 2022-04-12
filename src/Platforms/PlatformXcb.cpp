@@ -121,13 +121,15 @@ private:
 
 PlatformXcb::PlatformXcb(QObject *theParent)
     : Platform(theParent)
-    , mNativeEventFilter(new OnClickEventFilter(this))
+    , m_nativeEventFilter(new OnClickEventFilter(this))
 {
+    updateSupportedGrabModes();
+    connect(qGuiApp, &QGuiApplication::screenAdded, this, &PlatformXcb::updateSupportedGrabModes);
+    connect(qGuiApp, &QGuiApplication::screenRemoved, this, &PlatformXcb::updateSupportedGrabModes);
 }
 
 PlatformXcb::~PlatformXcb()
 {
-    delete mNativeEventFilter;
 }
 
 QString PlatformXcb::platformName() const
@@ -137,12 +139,25 @@ QString PlatformXcb::platformName() const
 
 Platform::GrabModes PlatformXcb::supportedGrabModes() const
 {
-    Platform::GrabModes lSupportedModes(
-        {GrabMode::AllScreens, GrabMode::ActiveWindow, GrabMode::WindowUnderCursor, GrabMode::TransientWithParent, GrabMode::PerScreenImageNative});
+    return m_grabModes;
+}
+
+void PlatformXcb::updateSupportedGrabModes()
+{
+    Platform::GrabModes grabModes = {
+        GrabMode::AllScreens, GrabMode::ActiveWindow,
+        GrabMode::WindowUnderCursor, GrabMode::TransientWithParent,
+        GrabMode::PerScreenImageNative
+    };
+
     if (QApplication::screens().count() > 1) {
-        lSupportedModes |= Platform::GrabMode::CurrentScreen;
+        grabModes |= Platform::GrabMode::CurrentScreen;
     }
-    return lSupportedModes;
+
+    if (m_grabModes != grabModes) {
+        m_grabModes = grabModes;
+        Q_EMIT supportedGrabModesChanged();
+    }
 }
 
 Platform::ShutterModes PlatformXcb::supportedShutterModes() const
@@ -744,9 +759,9 @@ void PlatformXcb::doGrabOnClick(GrabMode theGrabMode, bool theIncludePointer, bo
     }
 
     // fix things if our pointer grab causes a lockup and install our event filter
-    mNativeEventFilter->setCaptureOptions(theGrabMode, theIncludePointer, theIncludeDecorations);
+    m_nativeEventFilter->setCaptureOptions(theGrabMode, theIncludePointer, theIncludeDecorations);
     xcb_allow_events(QX11Info::connection(), XCB_ALLOW_SYNC_POINTER, XCB_TIME_CURRENT_TIME);
-    qApp->installNativeEventFilter(mNativeEventFilter);
+    qApp->installNativeEventFilter(m_nativeEventFilter.get());
 
     // done. clean stuff up
     xcb_cursor_context_free(lXcbCursorCtx);

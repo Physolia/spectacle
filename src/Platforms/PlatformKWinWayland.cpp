@@ -101,6 +101,9 @@ static QVector<QImage> readImages(int thePipeFd)
 PlatformKWinWayland::PlatformKWinWayland(QObject *parent)
     : Platform(parent)
 {
+    updateSupportedGrabModes();
+    connect(qGuiApp, &QGuiApplication::screenAdded, this, &PlatformKWinWayland::updateSupportedGrabModes);
+    connect(qGuiApp, &QGuiApplication::screenRemoved, this, &PlatformKWinWayland::updateSupportedGrabModes);
 }
 
 QString PlatformKWinWayland::platformName() const
@@ -156,26 +159,36 @@ std::array<int, 3> findPlasmaMinorVersion()
 
 Platform::GrabModes PlatformKWinWayland::supportedGrabModes() const
 {
-    Platform::GrabModes lSupportedModes({Platform::GrabMode::AllScreens, GrabMode::WindowUnderCursor});
+    return m_grabModes;
+}
+
+void PlatformKWinWayland::updateSupportedGrabModes()
+{
+    GrabModes grabModes = {Platform::GrabMode::AllScreens, GrabMode::WindowUnderCursor};
     QList<QScreen *> screens = QApplication::screens();
+    int screenCount = screens.count();
 
     // TODO remove sometime after Plasma 5.21 is released
     // We can handle rectangular selection one one screen not scale factor
     // on Plasma < 5.21
-    if (screenshotScreensAvailable() || (screens.count() == 1 && screens.first()->devicePixelRatio() == 1)) {
-        lSupportedModes |= Platform::GrabMode::PerScreenImageNative;
+    if (screenshotScreensAvailable() || (screenCount == 1 && screens.first()->devicePixelRatio() == 1)) {
+        grabModes |= Platform::GrabMode::PerScreenImageNative;
     }
 
     // TODO remove sometime after Plasma 5.20 is released
     auto plasmaVersion = findPlasmaMinorVersion();
     if (plasmaVersion.at(0) != -1 && (plasmaVersion.at(0) != 5 || (plasmaVersion.at(1) >= 20))) {
-        lSupportedModes |= Platform::GrabMode::AllScreensScaled;
+        grabModes |= Platform::GrabMode::AllScreensScaled;
     }
 
-    if (screens.count() > 1) {
-        lSupportedModes |= Platform::GrabMode::CurrentScreen;
+    if (screenCount > 1) {
+        grabModes |= Platform::GrabMode::CurrentScreen;
     }
-    return lSupportedModes;
+
+    if (m_grabModes != grabModes) {
+        m_grabModes = grabModes;
+        Q_EMIT supportedGrabModesChanged();
+    }
 }
 
 bool PlatformKWinWayland::screenshotScreensAvailable() const

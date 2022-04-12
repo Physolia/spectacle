@@ -6,6 +6,7 @@
  */
 
 #include "SpectacleCore.h"
+#include "CaptureModeModel.h"
 #include "spectacle_core_debug.h"
 
 #include "Config.h"
@@ -31,9 +32,14 @@
 #include <QMimeData>
 #include <QPainter>
 #include <QProcess>
+#include <QQmlComponent>
+#include <QQmlEngine>
+#include <QQuickItem>
 #include <QScopedPointer>
 #include <QScreen>
 #include <QTimer>
+
+#include <memory>
 
 SpectacleCore::SpectacleCore(QObject *parent)
     : QObject(parent)
@@ -42,20 +48,28 @@ SpectacleCore::SpectacleCore(QObject *parent)
 
 void SpectacleCore::init()
 {
-    mPlatform = loadPlatform();
+    m_platform = loadPlatform();
+    auto platform = m_platform.get();
 
     // essential connections
     connect(this, &SpectacleCore::errorMessage, this, &SpectacleCore::showErrorMessage);
-    connect(mPlatform.get(), &Platform::newScreenshotTaken, this, &SpectacleCore::screenshotUpdated);
-    connect(mPlatform.get(), &Platform::newScreensScreenshotTaken, this, &SpectacleCore::screenshotsUpdated);
-    connect(mPlatform.get(), &Platform::newScreenshotFailed, this, &SpectacleCore::screenshotFailed);
+    connect(platform, &Platform::newScreenshotTaken, this, &SpectacleCore::onScreenshotUpdated);
+    connect(platform, &Platform::newScreensScreenshotTaken, this, &SpectacleCore::onScreenshotsUpdated);
+    connect(platform, &Platform::newScreenshotFailed, this, &SpectacleCore::onScreenshotFailed);
+
+    // set up CaptureMode model
+    m_captureModeModel = std::make_unique<CaptureModeModel>(platform->supportedGrabModes(), this);
+    auto captureModeModel = m_captureModeModel.get();
+    connect(platform, &Platform::supportedGrabModesChanged, captureModeModel, [captureModeModel, platform](){
+        captureModeModel->setGrabModes(platform->supportedGrabModes());
+    });
 
     // set up the export manager
     auto lExportManager = ExportManager::instance();
     connect(lExportManager, &ExportManager::errorMessage, this, &SpectacleCore::showErrorMessage);
     connect(lExportManager, &ExportManager::imageSaved, this, &SpectacleCore::doCopyPath);
     connect(lExportManager, &ExportManager::forceNotify, this, &SpectacleCore::doNotify);
-    connect(mPlatform.get(), &Platform::windowTitleChanged, lExportManager, &ExportManager::setWindowTitle);
+    connect(platform, &Platform::windowTitleChanged, lExportManager, &ExportManager::setWindowTitle);
 
     // Needed so the QuickEditor can go fullscreen on wayland
     if (KWindowSystem::isPlatformWayland()) {
@@ -67,12 +81,19 @@ void SpectacleCore::init()
         Registry *registry = new Registry(this);
         registry->create(connection);
         connect(registry, &Registry::plasmaShellAnnounced, this, [this, registry](quint32 name, quint32 version) {
-            mWaylandPlasmashell = registry->createPlasmaShell(name, version, this);
+            m_waylandPlasmashell = registry->createPlasmaShell(name, version, this);
         });
         registry->setup();
         connection->roundtrip();
     }
-    setUpShortcuts();
+
+    // set up shortcuts
+    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->openAction(), Qt::Key_Print);
+    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->fullScreenAction(), Qt::SHIFT | Qt::Key_Print);
+    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->activeWindowAction(), Qt::META | Qt::Key_Print);
+    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->windowUnderCursorAction(), Qt::META | Qt::CTRL | Qt::Key_Print);
+    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->regionAction(), Qt::META | Qt::SHIFT | Qt::Key_Print);
+    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->currentScreenAction(), QList<QKeySequence>());
 }
 
 void SpectacleCore::onActivateRequested(QStringList arguments, const QString & /*workingDirectory */)
@@ -86,31 +107,28 @@ void SpectacleCore::onActivateRequested(QStringList arguments, const QString & /
     populateCommandLineParser(parser.data());
     parser->parse(arguments);
 
-    mStartMode = SpectacleCore::StartMode::Gui;
-    mExistingLoaded = false;
-    mNotify = true;
+    m_startMode = SpectacleCore::StartMode::Gui;
+    m_existingLoaded = false;
+    m_notify = true;
     qint64 lDelayMsec = 0;
 
     // are we ask to run in background or dbus mode?
     if (parser->isSet(QStringLiteral("background"))) {
-        mStartMode = SpectacleCore::StartMode::Background;
+        m_startMode = SpectacleCore::StartMode::Background;
     } else if (parser->isSet(QStringLiteral("dbus"))) {
-        mStartMode = SpectacleCore::StartMode::DBus;
+        m_startMode = SpectacleCore::StartMode::DBus;
     }
 
-    mEditExisting = parser->isSet(QStringLiteral("edit-existing"));
-    if (mEditExisting) {
+    m_editExisting = parser->isSet(QStringLiteral("edit-existing"));
+    if (m_editExisting) {
         QString lExistingFileName = parser->value(QStringLiteral("edit-existing"));
         if (!(lExistingFileName.isEmpty() || lExistingFileName.isNull())) {
-            if (QDir::isRelativePath(lExistingFileName)) {
-                lExistingFileName = QDir::current().absoluteFilePath(lExistingFileName);
-            }
-            setFilename(lExistingFileName);
-            mSaveToOutput = true;
+            setScreenCaptureUrl(lExistingFileName);
+            m_saveToOutput = true;
         }
     }
 
-    auto lOnClickAvailable = mPlatform->supportedShutterModes().testFlag(Platform::ShutterMode::OnClick);
+    auto lOnClickAvailable = m_platform->supportedShutterModes().testFlag(Platform::ShutterMode::OnClick);
     if ((!lOnClickAvailable) && (lDelayMsec < 0)) {
         lDelayMsec = 0;
     }
@@ -120,28 +138,28 @@ void SpectacleCore::onActivateRequested(QStringList arguments, const QString & /
         Settings::setCropRegion({0, 0, 0, 0});
     }
 
-    Spectacle::CaptureMode lCaptureMode = Spectacle::CaptureMode::AllScreens;
+    CaptureModeModel::CaptureMode lCaptureMode = CaptureModeModel::AllScreens;
     // extract the capture mode
     if (parser->isSet(QStringLiteral("fullscreen"))) {
-        lCaptureMode = Spectacle::CaptureMode::AllScreens;
+        lCaptureMode = CaptureModeModel::AllScreens;
     } else if (parser->isSet(QStringLiteral("current"))) {
-        lCaptureMode = Spectacle::CaptureMode::CurrentScreen;
+        lCaptureMode = CaptureModeModel::CurrentScreen;
     } else if (parser->isSet(QStringLiteral("activewindow"))) {
-        lCaptureMode = Spectacle::CaptureMode::ActiveWindow;
+        lCaptureMode = CaptureModeModel::ActiveWindow;
     } else if (parser->isSet(QStringLiteral("region"))) {
-        lCaptureMode = Spectacle::CaptureMode::RectangularRegion;
+        lCaptureMode = CaptureModeModel::RectangularRegion;
     } else if (parser->isSet(QStringLiteral("windowundercursor"))) {
-        lCaptureMode = Spectacle::CaptureMode::TransientWithParent;
+        lCaptureMode = CaptureModeModel::TransientWithParent;
     } else if (parser->isSet(QStringLiteral("transientonly"))) {
-        lCaptureMode = Spectacle::CaptureMode::WindowUnderCursor;
-    } else if (mStartMode == SpectacleCore::StartMode::Gui
-               && (parser->isSet(QStringLiteral("launchonly")) || Settings::onLaunchAction() == Settings::EnumOnLaunchAction::DoNotTakeScreenshot)
-               && !mEditExisting) {
+        lCaptureMode = CaptureModeModel::WindowUnderCursor;
+    } else if (m_startMode == SpectacleCore::StartMode::Gui
+               && (parser->isSet(QStringLiteral("launchonly")) || Settings::launchAction() == Settings::EnumLaunchAction::DoNotTakeScreenshot)
+               && !m_editExisting) {
         initGuiNoScreenshot();
         return;
-    } else if (Settings::onLaunchAction() == Settings::EnumOnLaunchAction::UseLastUsedCapturemode && !mEditExisting) {
-        lCaptureMode = Settings::captureMode();
-        if (Settings::onClickChecked()) {
+    } else if (Settings::launchAction() == Settings::EnumLaunchAction::UseLastUsedCapturemode && !m_editExisting) {
+        lCaptureMode = CaptureModeModel::CaptureMode(Settings::captureMode());
+        if (Settings::captureOnClick()) {
             lDelayMsec = -1;
             takeNewScreenshot(lCaptureMode, lDelayMsec, Settings::includePointer(), Settings::includeDecorations());
         }
@@ -150,38 +168,35 @@ void SpectacleCore::onActivateRequested(QStringList arguments, const QString & /
     auto lExportManager = ExportManager::instance();
     lExportManager->setCaptureMode(lCaptureMode);
 
-    switch (mStartMode) {
+    switch (m_startMode) {
     case StartMode::DBus:
-        mCopyImageToClipboard = Settings::clipboardGroup() == Settings::EnumClipboardGroup::PostScreenshotCopyImage;
-        mCopyLocationToClipboard = Settings::clipboardGroup() == Settings::EnumClipboardGroup::PostScreenshotCopyLocation;
+        m_copyImageToClipboard = Settings::clipboardGroup() == Settings::EnumClipboardGroup::PostScreenshotCopyImage;
+        m_copyLocationToClipboard = Settings::clipboardGroup() == Settings::EnumClipboardGroup::PostScreenshotCopyLocation;
 
         qApp->setQuitOnLastWindowClosed(false);
         break;
 
     case StartMode::Background: {
-        mCopyImageToClipboard = false;
-        mCopyLocationToClipboard = false;
-        mSaveToOutput = true;
+        m_copyImageToClipboard = false;
+        m_copyLocationToClipboard = false;
+        m_saveToOutput = true;
 
         if (parser->isSet(QStringLiteral("nonotify"))) {
-            mNotify = false;
+            m_notify = false;
         }
 
         if (parser->isSet(QStringLiteral("copy-image"))) {
-            mSaveToOutput = false;
-            mCopyImageToClipboard = true;
+            m_saveToOutput = false;
+            m_copyImageToClipboard = true;
         } else if (parser->isSet(QStringLiteral("copy-path"))) {
-            mCopyLocationToClipboard = true;
+            m_copyLocationToClipboard = true;
         }
 
         if (parser->isSet(QStringLiteral("output"))) {
-            mSaveToOutput = true;
+            m_saveToOutput = true;
             QString lFileName = parser->value(QStringLiteral("output"));
             if (!(lFileName.isEmpty() || lFileName.isNull())) {
-                if (QDir::isRelativePath(lFileName)) {
-                    lFileName = QDir::current().absoluteFilePath(lFileName);
-                }
-                setFilename(lFileName);
+                setScreenCaptureUrl(lFileName);
             }
         }
 
@@ -197,8 +212,8 @@ void SpectacleCore::onActivateRequested(QStringList arguments, const QString & /
             lDelayMsec = -1;
         }
 
-        if (!mIsGuiInited) {
-            static_cast<QGuiApplication *>(qApp->instance())->setQuitOnLastWindowClosed(false);
+        if (!m_isGuiInited) {
+            static_cast<QApplication *>(qApp->instance())->setQuitOnLastWindowClosed(false);
         }
 
         auto lIncludePointer = false;
@@ -216,25 +231,27 @@ void SpectacleCore::onActivateRequested(QStringList arguments, const QString & /
     } break;
 
     case StartMode::Gui:
-        if (!mIsGuiInited) {
+        if (!m_isGuiInited) {
             initGui(lDelayMsec, Settings::includePointer(), Settings::includeDecorations());
         } else {
             using Actions = Settings::EnumPrintKeyActionRunning;
             switch (Settings::printKeyActionRunning()) {
             case Actions::TakeNewScreenshot: {
                 // 0 means Immediate, -1 onClick
-                int timeout = mPlatform->supportedShutterModes().testFlag(Platform::ShutterMode::Immediate) ? 0 : -1;
-                takeNewScreenshot(Settings::captureMode(), timeout, Settings::includePointer(), Settings::includeDecorations());
+                int timeout = m_platform->supportedShutterModes().testFlag(Platform::ShutterMode::Immediate) ? 0 : -1;
+                takeNewScreenshot(CaptureModeModel::CaptureMode(Settings::captureMode()), timeout, Settings::includePointer(), Settings::includeDecorations());
                 break;
             }
             case Actions::FocusWindow:
-                if (mMainWindow->isHidden()) {
-                    mMainWindow->show();
+                if (m_mainWindow->visibility() == QWindow::Hidden) {
+                    m_mainWindow->show();
                 }
-                if (mMainWindow->isMinimized()) {
-                    mMainWindow->setWindowState(mMainWindow->windowState() & ~Qt::WindowMinimized);
+                // NOTE: A window can be visible and minimized at the same time.
+                if (m_mainWindow->windowState() & Qt::WindowMinimized) {
+                    // Unminimize the window.
+                    m_mainWindow->setWindowState(Qt::WindowState(m_mainWindow->windowState() & ~Qt::WindowMinimized));
                 }
-                mMainWindow->activateWindow();
+                m_mainWindow->requestActivate();
                 break;
             case Actions::StartNewInstance:
                 QProcess newInstance;
@@ -249,41 +266,41 @@ void SpectacleCore::onActivateRequested(QStringList arguments, const QString & /
     }
 }
 
-void SpectacleCore::setUpShortcuts()
+CaptureModeModel *SpectacleCore::captureModeModel() const
 {
-    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->openAction(), Qt::Key_Print);
-
-    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->fullScreenAction(), Qt::SHIFT | Qt::Key_Print);
-
-    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->activeWindowAction(), Qt::META | Qt::Key_Print);
-
-    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->windowUnderCursorAction(), Qt::META | Qt::CTRL | Qt::Key_Print);
-
-    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->regionAction(), Qt::META | Qt::SHIFT | Qt::Key_Print);
-
-    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->currentScreenAction(), QList<QKeySequence>());
-
-    KGlobalAccel::self()->setGlobalShortcut(ShortcutActions::self()->openWithoutScreenshotAction(), QList<QKeySequence>());
+    return m_captureModeModel.get();
 }
 
-QString SpectacleCore::filename() const
+QUrl SpectacleCore::screenCaptureUrl() const
 {
-    return mFileNameString;
+    return m_screenCaptureUrl;
 }
 
-void SpectacleCore::setFilename(const QString &filename)
+void SpectacleCore::setScreenCaptureUrl(const QUrl &url)
 {
-    mFileNameString = filename;
-    mFileNameUrl = QUrl::fromUserInput(filename);
+    if(m_screenCaptureUrl == url) {
+        return;
+    }
+    m_screenCaptureUrl = url;
+    Q_EMIT screenCaptureUrlChanged();
 }
 
-void SpectacleCore::takeNewScreenshot(Spectacle::CaptureMode theCaptureMode, int theTimeout, bool theIncludePointer, bool theIncludeDecorations)
+void SpectacleCore::setScreenCaptureUrl(const QString &filePath)
 {
-    ExportManager::instance()->setCaptureMode(theCaptureMode);
-    auto lGrabMode = toPlatformGrabMode(theCaptureMode);
+    if (QDir::isRelativePath(filePath)) {
+        setScreenCaptureUrl(QUrl::fromUserInput(QDir::current().absoluteFilePath(filePath)));
+    } else {
+        setScreenCaptureUrl(QUrl::fromUserInput(filePath));
+    }
+}
 
-    if (theTimeout < 0 || !mPlatform->supportedShutterModes().testFlag(Platform::ShutterMode::Immediate)) {
-        mPlatform->doGrab(Platform::ShutterMode::OnClick, lGrabMode, theIncludePointer, theIncludeDecorations);
+void SpectacleCore::takeNewScreenshot(int captureMode, int timeout, bool includePointer, bool includeDecorations)
+{
+    ExportManager::instance()->setCaptureMode(CaptureModeModel::CaptureMode(captureMode));
+    auto lGrabMode = toPlatformGrabMode(CaptureModeModel::CaptureMode(captureMode));
+
+    if (timeout < 0 || !m_platform->supportedShutterModes().testFlag(Platform::ShutterMode::Immediate)) {
+        m_platform->doGrab(Platform::ShutterMode::OnClick, lGrabMode, includePointer, includeDecorations);
         return;
     }
 
@@ -294,8 +311,8 @@ void SpectacleCore::takeNewScreenshot(Spectacle::CaptureMode theCaptureMode, int
     // milliseconds is a good amount of wait time.
 
     auto lMsec = KWindowSystem::compositingActive() ? 200 : 50;
-    QTimer::singleShot(theTimeout + lMsec, this, [this, lGrabMode, theIncludePointer, theIncludeDecorations]() {
-        mPlatform->doGrab(Platform::ShutterMode::Immediate, lGrabMode, theIncludePointer, theIncludeDecorations);
+    QTimer::singleShot(timeout + lMsec, this, [this, lGrabMode, includePointer, includeDecorations]() {
+        m_platform->doGrab(Platform::ShutterMode::Immediate, lGrabMode, includePointer, includeDecorations);
     });
 }
 
@@ -303,131 +320,137 @@ void SpectacleCore::showErrorMessage(const QString &theErrString)
 {
     qCDebug(SPECTACLE_CORE_LOG) << "ERROR: " << theErrString;
 
-    if (mStartMode == StartMode::Gui) {
+    if (m_startMode == StartMode::Gui) {
         KMessageBox::error(nullptr, theErrString);
     }
 }
 
-void SpectacleCore::screenshotsUpdated(const QVector<QImage> &imgs)
+void SpectacleCore::onScreenshotsUpdated(const QVector<QImage> &imgs)
 {
     QMap<const QScreen *, QImage> mapScreens;
-    QList<QScreen *> screens = QGuiApplication::screens();
+    QList<QScreen *> screens = QApplication::screens();
 
     if (imgs.length() != screens.size()) {
         qWarning(SPECTACLE_CORE_LOG()) << "ERROR: images received from KWin do not match, expected:" << imgs.length() << "actual:" << screens.size();
         return;
     }
 
-    // only used by Spectacle::CaptureMode::RectangularRegion
+    // only used by CaptureModeModel::RectangularRegion
     auto it = imgs.constBegin();
     for (const QScreen *screen : screens) {
         mapScreens.insert(screen, *it);
         ++it;
     }
 
-    mQuickEditor = std::make_unique<QuickEditor>(mapScreens, mWaylandPlasmashell);
-    connect(mQuickEditor.get(), &QuickEditor::grabDone, this, &SpectacleCore::screenshotUpdated);
-    connect(mQuickEditor.get(), &QuickEditor::grabCancelled, this, &SpectacleCore::screenshotCanceled);
-    mQuickEditor->show();
+    //TODO FIXME
+//     m_quickEditor = std::make_unique<QuickEditor>(mapScreens, m_waylandPlasmashell);
+//     connect(m_quickEditor.get(), &QuickEditor::grabDone, this, &SpectacleCore::onScreenshotUpdated);
+//     connect(m_quickEditor.get(), &QuickEditor::grabCancelled, this, &SpectacleCore::onScreenshotCanceled);
+//     m_quickEditor->show();
 }
 
-void SpectacleCore::screenshotUpdated(const QPixmap &thePixmap)
+void SpectacleCore::onScreenshotUpdated(const QPixmap &thePixmap)
 {
     QPixmap existingPixmap;
-    const QPixmap &pixmapUsed = (mEditExisting && !mExistingLoaded) ? existingPixmap : thePixmap;
-    if (mEditExisting && !mExistingLoaded) {
-        existingPixmap.load(filename());
+    const QPixmap &pixmapUsed = (m_editExisting && !m_existingLoaded) ? existingPixmap : thePixmap;
+    if (m_editExisting && !m_existingLoaded) {
+        existingPixmap.load(m_screenCaptureUrl.toLocalFile());
     }
 
     auto lExportManager = ExportManager::instance();
 
-    if (lExportManager->captureMode() == Spectacle::CaptureMode::RectangularRegion) {
-        if (mQuickEditor) {
-            mQuickEditor->hide();
-            mQuickEditor.reset(nullptr);
+    if (lExportManager->captureMode() == CaptureModeModel::RectangularRegion) {
+        if (m_quickEditor) {
+            //TODO FIXME
+//             m_quickEditor->hide();
+            m_quickEditor.reset(nullptr);
         }
     }
 
     lExportManager->setPixmap(pixmapUsed);
     lExportManager->updatePixmapTimestamp();
 
-    switch (mStartMode) {
+    switch (m_startMode) {
     case StartMode::Background:
     case StartMode::DBus: {
-        if (mSaveToOutput || !mCopyImageToClipboard || (Settings::autoSaveImage() && !mSaveToOutput)) {
-            mSaveToOutput = Settings::autoSaveImage();
-            QUrl lSavePath = (mStartMode == StartMode::Background && mFileNameUrl.isValid() && mFileNameUrl.isLocalFile()) ? mFileNameUrl : QUrl();
-            lExportManager->doSave(lSavePath, mNotify);
+        if (m_saveToOutput || !m_copyImageToClipboard || (Settings::autoSaveImage() && !m_saveToOutput)) {
+            m_saveToOutput = Settings::autoSaveImage();
+            QUrl lSavePath = (m_startMode == StartMode::Background && m_screenCaptureUrl.isValid() && m_screenCaptureUrl.isLocalFile()) ? m_screenCaptureUrl : QUrl();
+            lExportManager->doSave(lSavePath, m_notify);
         }
 
-        if (mCopyImageToClipboard) {
-            lExportManager->doCopyToClipboard(mNotify);
-        } else if (mCopyLocationToClipboard) {
-            lExportManager->doCopyLocationToClipboard(mNotify);
+        if (m_copyImageToClipboard) {
+            lExportManager->doCopyToClipboard(m_notify);
+        } else if (m_copyLocationToClipboard) {
+            lExportManager->doCopyLocationToClipboard(m_notify);
         }
 
         // if we don't have a Gui already opened, Q_EMIT allDone
-        if (!mIsGuiInited) {
+        if (!m_isGuiInited) {
             // if we notify, we Q_EMIT allDone only if the user either dismissed the notification or pressed
             // the "Open" button, otherwise the app closes before it can react to it.
-            if (!mNotify && mCopyImageToClipboard) {
+            if (!m_notify && m_copyImageToClipboard) {
                 // Allow some time for clipboard content to transfer if '--nonotify' is used, see Bug #411263
                 // TODO: Find better solution
                 QTimer::singleShot(250, this, &SpectacleCore::allDone);
-            } else if (!mNotify) {
+            } else if (!m_notify) {
                 Q_EMIT allDone();
             }
         }
     } break;
     case StartMode::Gui:
         if (pixmapUsed.isNull()) {
-            mMainWindow->setScreenshotAndShow(pixmapUsed, false);
-            mMainWindow->setPlaceholderTextOnLaunch();
+            //TODO FIXME
+            m_mainWindow->setScreenshotAndShow(pixmapUsed, false);
+            m_mainWindow->setPlaceholderTextOnLaunch();
             return;
         }
-        mMainWindow->setScreenshotAndShow(pixmapUsed, mEditExisting);
+        m_mainWindow->setScreenshotAndShow(pixmapUsed, m_editExisting);
 
         bool autoSaveImage = Settings::autoSaveImage();
-        mCopyImageToClipboard = Settings::clipboardGroup() == Settings::EnumClipboardGroup::PostScreenshotCopyImage;
-        mCopyLocationToClipboard = Settings::clipboardGroup() == Settings::EnumClipboardGroup::PostScreenshotCopyLocation;
+        m_copyImageToClipboard = Settings::clipboardGroup() == Settings::EnumClipboardGroup::PostScreenshotCopyImage;
+        m_copyLocationToClipboard = Settings::clipboardGroup() == Settings::EnumClipboardGroup::PostScreenshotCopyLocation;
 
-        if (autoSaveImage && mCopyImageToClipboard) {
+        if (autoSaveImage && m_copyImageToClipboard) {
             lExportManager->doSaveAndCopy();
         } else if (autoSaveImage) {
             lExportManager->doSave();
-        } else if (mCopyImageToClipboard) {
+        } else if (m_copyImageToClipboard) {
             lExportManager->doCopyToClipboard(false);
-        } else if (mCopyLocationToClipboard) {
+        } else if (m_copyLocationToClipboard) {
             lExportManager->doCopyLocationToClipboard(false);
         }
     }
 
-    if (mEditExisting && !mExistingLoaded) {
-        Settings::setLastSaveLocation(mFileNameUrl);
-        mMainWindow->imageSaved(mFileNameUrl);
-        mExistingLoaded = true;
+    if (m_editExisting && !m_existingLoaded) {
+        Settings::setLastSaveLocation(m_screenCaptureUrl);
+        //TODO FIXME
+        m_mainWindow->onImageSaved(m_screenCaptureUrl);
+        m_existingLoaded = true;
     }
 }
 
-void SpectacleCore::screenshotCanceled()
+void SpectacleCore::onScreenshotCanceled()
 {
-    mQuickEditor->hide();
-    mQuickEditor.reset(nullptr);
-    if (mStartMode == StartMode::Gui) {
-        mMainWindow->setScreenshotAndShow(QPixmap(), false);
+    //TODO FIXME
+//     m_quickEditor->hide();
+    m_quickEditor.reset(nullptr);
+    if (m_startMode == StartMode::Gui) {
+        m_mainWindow->setScreenshotAndShow(QPixmap(), false);
     } else {
         Q_EMIT allDone();
     }
 }
 
-void SpectacleCore::screenshotFailed()
+void SpectacleCore::onScreenshotFailed()
 {
-    if (ExportManager::instance()->captureMode() == Spectacle::CaptureMode::RectangularRegion && mQuickEditor) {
-        mQuickEditor->hide();
-        mQuickEditor.reset(nullptr);
+    if (ExportManager::instance()->captureMode() == CaptureModeModel::RectangularRegion && m_quickEditor) {
+        //TODO FIXME
+//         m_quickEditor->hide();
+        m_quickEditor.reset(nullptr);
     }
 
-    switch (mStartMode) {
+    switch (m_startMode) {
     case StartMode::Background:
         showErrorMessage(i18n("Screenshot capture canceled or failed"));
         Q_EMIT allDone();
@@ -437,8 +460,10 @@ void SpectacleCore::screenshotFailed()
         Q_EMIT allDone();
         return;
     case StartMode::Gui:
-        mMainWindow->screenshotFailed();
-        mMainWindow->setScreenshotAndShow(QPixmap(), false);
+        //TODO FIXME
+        m_mainWindow->onScreenshotFailed();
+        m_mainWindow->setScreenshotAndShow(QPixmap(), false);
+        return;
     }
 }
 
@@ -447,33 +472,33 @@ void SpectacleCore::doNotify(const QUrl &theSavedAt)
     KNotification *lNotify = new KNotification(QStringLiteral("newScreenshotSaved"));
 
     switch (ExportManager::instance()->captureMode()) {
-    case Spectacle::CaptureMode::AllScreens:
-    case Spectacle::CaptureMode::AllScreensScaled:
+    case CaptureModeModel::AllScreens:
+    case CaptureModeModel::AllScreensScaled:
         lNotify->setTitle(i18nc("The entire screen area was captured, heading", "Full Screen Captured"));
         break;
-    case Spectacle::CaptureMode::CurrentScreen:
+    case CaptureModeModel::CurrentScreen:
         lNotify->setTitle(i18nc("The current screen was captured, heading", "Current Screen Captured"));
         break;
-    case Spectacle::CaptureMode::ActiveWindow:
+    case CaptureModeModel::ActiveWindow:
         lNotify->setTitle(i18nc("The active window was captured, heading", "Active Window Captured"));
         break;
-    case Spectacle::CaptureMode::WindowUnderCursor:
-    case Spectacle::CaptureMode::TransientWithParent:
+    case CaptureModeModel::WindowUnderCursor:
+    case CaptureModeModel::TransientWithParent:
         lNotify->setTitle(i18nc("The window under the mouse was captured, heading", "Window Under Cursor Captured"));
         break;
-    case Spectacle::CaptureMode::RectangularRegion:
+    case CaptureModeModel::RectangularRegion:
         lNotify->setTitle(i18nc("A rectangular region was captured, heading", "Rectangular Region Captured"));
         break;
-    case Spectacle::CaptureMode::InvalidChoice:
+    default:
         break;
     }
 
     // a speaking message is prettier than a URL, special case for copy image/location to clipboard and the default pictures location
     const QString &lSavePath = theSavedAt.adjusted(QUrl::RemoveFilename | QUrl::StripTrailingSlash).path();
 
-    if (mCopyImageToClipboard && theSavedAt.fileName().isEmpty()) {
+    if (m_copyImageToClipboard && theSavedAt.fileName().isEmpty()) {
         lNotify->setText(i18n("A screenshot was saved to your clipboard."));
-    } else if (mCopyLocationToClipboard && !theSavedAt.fileName().isEmpty()) {
+    } else if (m_copyLocationToClipboard && !theSavedAt.fileName().isEmpty()) {
         lNotify->setText(i18n("A screenshot was saved as '%1' to '%2' and the file path of the screenshot has been saved to your clipboard.",
                               theSavedAt.fileName(),
                               lSavePath));
@@ -490,13 +515,13 @@ void SpectacleCore::doNotify(const QUrl &theSavedAt)
             auto job = new KIO::OpenUrlJob(theSavedAt);
             job->start();
             QTimer::singleShot(250, this, [this] {
-                if (!mIsGuiInited || Settings::quitAfterSaveCopyExport()) {
+                if (!m_isGuiInited || Settings::quitAfterSaveCopyExport()) {
                     Q_EMIT allDone();
                 }
             });
         });
         lNotify->setActions({i18n("Annotate")});
-        connect(lNotify, &KNotification::action1Activated, this, [this, theSavedAt]() {
+        connect(lNotify, &KNotification::action1Activated, this, [theSavedAt]() {
             QProcess newInstance;
             newInstance.setProgram(QStringLiteral("spectacle"));
             newInstance.setArguments({QStringLiteral("--new-instance"), QStringLiteral("--edit-existing"), theSavedAt.toLocalFile()});
@@ -505,7 +530,7 @@ void SpectacleCore::doNotify(const QUrl &theSavedAt)
     }
 
     connect(lNotify, &QObject::destroyed, this, [this] {
-        if (!mIsGuiInited || Settings::quitAfterSaveCopyExport()) {
+        if (!m_isGuiInited || Settings::quitAfterSaveCopyExport()) {
             Q_EMIT allDone();
         }
     });
@@ -571,50 +596,71 @@ void SpectacleCore::doStartDragAndDrop()
 
 // Private
 
-Platform::GrabMode SpectacleCore::toPlatformGrabMode(Spectacle::CaptureMode theCaptureMode)
+Platform::GrabMode SpectacleCore::toPlatformGrabMode(CaptureModeModel::CaptureMode theCaptureMode)
 {
     switch (theCaptureMode) {
-    case Spectacle::CaptureMode::InvalidChoice:
-        return Platform::GrabMode::InvalidChoice;
-    case Spectacle::CaptureMode::AllScreens:
+    case CaptureModeModel::AllScreens:
         return Platform::GrabMode::AllScreens;
-    case Spectacle::CaptureMode::AllScreensScaled:
-        return Platform::GrabMode::AllScreensScaled;
-    case Spectacle::CaptureMode::RectangularRegion:
-        return Platform::GrabMode::PerScreenImageNative;
-    case Spectacle::CaptureMode::TransientWithParent:
-        return Platform::GrabMode::TransientWithParent;
-    case Spectacle::CaptureMode::CurrentScreen:
+    case CaptureModeModel::CurrentScreen:
         return Platform::GrabMode::CurrentScreen;
-    case Spectacle::CaptureMode::ActiveWindow:
+    case CaptureModeModel::ActiveWindow:
         return Platform::GrabMode::ActiveWindow;
-    case Spectacle::CaptureMode::WindowUnderCursor:
+    case CaptureModeModel::WindowUnderCursor:
         return Platform::GrabMode::WindowUnderCursor;
+    case CaptureModeModel::TransientWithParent:
+        return Platform::GrabMode::TransientWithParent;
+    case CaptureModeModel::RectangularRegion:
+        return Platform::GrabMode::PerScreenImageNative;
+    case CaptureModeModel::AllScreensScaled:
+        return Platform::GrabMode::AllScreensScaled;
+    default:
+        return Platform::GrabMode::InvalidChoice;
     }
-    return Platform::GrabMode::InvalidChoice;
+}
+
+QQmlEngine *SpectacleCore::getQmlEngine()
+{
+    if (m_qmlEngine == nullptr) {
+        m_qmlEngine = std::make_unique<QQmlEngine>(this);
+        qmlRegisterSingletonInstance("org.kde.spectacle.private", 1, 0, "SpectacleCore", this);
+        qmlRegisterSingletonInstance("org.kde.spectacle.private", 1, 0, "Platform", m_platform.get());
+        qmlRegisterSingletonInstance("org.kde.spectacle.private", 1, 0, "Settings", Settings::self());
+        qmlRegisterUncreatableType<CaptureModeModel>("org.kde.spectacle.private", 1, 0, "CaptureModeModel", QStringLiteral("Use SpectacleCore.captureModeModel"));
+    }
+    return m_qmlEngine.get();
+}
+
+SpectacleMainWindow *SpectacleCore::getMainWindow()
+{
+    if (m_mainWindow == nullptr) {
+        m_mainWindow = std::make_unique<SpectacleMainWindow>(getQmlEngine());
+        auto mainWindow = m_mainWindow.get();
+        connect(mainWindow, &SpectacleMainWindow::newScreenshotRequest, this, &SpectacleCore::takeNewScreenshot);
+        connect(mainWindow, &SpectacleMainWindow::dragAndDropRequest, this, &SpectacleCore::doStartDragAndDrop);
+        connect(mainWindow, &QObject::destroyed, Settings::self(), &Settings::save);
+    }
+    return m_mainWindow.get();
 }
 
 void SpectacleCore::ensureGuiInitiad()
 {
-    if (!mIsGuiInited) {
-        mMainWindow = std::make_unique<KSMainWindow>(mPlatform->supportedGrabModes(), mPlatform->supportedShutterModes());
+    if (!m_isGuiInited) {
+        getMainWindow();
 
-        connect(mMainWindow.get(), &KSMainWindow::newScreenshotRequest, this, &SpectacleCore::takeNewScreenshot);
-        connect(mMainWindow.get(), &KSMainWindow::dragAndDropRequest, this, &SpectacleCore::doStartDragAndDrop);
+        //TODO add QuickEditor
 
-        mIsGuiInited = true;
+        m_isGuiInited = true;
     }
 }
 
 void SpectacleCore::initGui(int theDelay, bool theIncludePointer, bool theIncludeDecorations)
 {
     ensureGuiInitiad();
-
     takeNewScreenshot(ExportManager::instance()->captureMode(), theDelay, theIncludePointer, theIncludeDecorations);
 }
 
 void SpectacleCore::initGuiNoScreenshot()
 {
     ensureGuiInitiad();
-    screenshotUpdated(QPixmap());
+    onScreenshotUpdated(QPixmap());
 }

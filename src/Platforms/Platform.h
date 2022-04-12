@@ -9,14 +9,16 @@
 #include <QFlags>
 #include <QObject>
 
-#include "QuickEditor/ComparableQPoint.h"
-
 class Platform : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(GrabModes supportedGrabModes READ supportedGrabModes NOTIFY supportedGrabModesChanged)
+    // Currently, supportedShutterModes never changes.
+    // Be sure to add a changed signal if it is ever able to change.
+    Q_PROPERTY(GrabModes supportedShutterModes READ supportedShutterModes CONSTANT)
 
 public:
-    enum class GrabMode {
+    enum GrabMode {
         InvalidChoice = 0x00,
         AllScreens = 0x01,
         CurrentScreen = 0x02,
@@ -26,11 +28,11 @@ public:
         AllScreensScaled = 0x20,
         PerScreenImageNative = 0x40,
     };
-    using GrabModes = QFlags<GrabMode>;
+    Q_DECLARE_FLAGS(GrabModes, GrabMode)
     Q_FLAG(GrabModes)
 
-    enum class ShutterMode { Immediate = 0x01, OnClick = 0x02 };
-    using ShutterModes = QFlags<ShutterMode>;
+    enum ShutterMode { Immediate = 0x01, OnClick = 0x02 };
+    Q_DECLARE_FLAGS(ShutterModes, ShutterMode)
     Q_FLAG(ShutterModes)
 
     explicit Platform(QObject *parent = nullptr);
@@ -41,10 +43,10 @@ public:
     virtual ShutterModes supportedShutterModes() const = 0;
 
 public Q_SLOTS:
-
     virtual void doGrab(Platform::ShutterMode theShutterMode, Platform::GrabMode theGrabMode, bool theIncludePointer, bool theIncludeDecorations) = 0;
 
 Q_SIGNALS:
+    void supportedGrabModesChanged();
 
     void newScreenshotTaken(const QPixmap &thePixmap);
     void newScreensScreenshotTaken(const QVector<QImage> &images);
